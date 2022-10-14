@@ -15,7 +15,7 @@ class Router:
             port, neighbor, relation = relationship.split("-")
 
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sockets[neighbor].bind(('localhost', 0))
+            self.sockets[neighbor].bind(('localhost', 0)) #Port 0 triggers OS to automatically return a suitable available port
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
             self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
