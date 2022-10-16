@@ -11,8 +11,10 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "subProcess": true,
             "justMyCode": true,
-            "args": ["7", "7833-1.2.3.2-cust", "2374-192.168.0.2-peer", "1293-67.32.9.2-prov"]
+            //"args": ["7", "7833-1.2.3.2-cust", "2374-192.168.0.2-peer", "1293-67.32.9.2-prov"]
+            "args": ["configs/1-1-simple-send.conf"]
         }
     ]
 }
