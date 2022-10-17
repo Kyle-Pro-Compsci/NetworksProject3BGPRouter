@@ -184,9 +184,10 @@ class Router:
         self.send(dst_ip, json.dumps(announcement_dict))
         return
 
-    # Handle a received message of type data
+    # Handle a received message of type data (STILL NEED TO HANDLE ILLEGAL DATA - bad relationship)
     def handle_data(self, data_dict, sock_received):
         routes_to_destination = []
+        # Fill out any routes that fit network masks
         for entry in self.forwarding_table:
             if self.mask(data_dict['dst'], entry.netmask) == self.mask(entry.network, entry.netmask):
                 routes_to_destination.append(entry)
