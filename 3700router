@@ -2,22 +2,68 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 
-class Table_entry:
+
+class TableEntry:
     ASPath = []
 
-    def __init__(self, AS, ASPath, localpref, selfOrigin, origin):
-        self.ASPath = [AS] + ASPath
+    def __init__(self, peer, netmask, network, ASPath, localpref, selfOrigin, origin):
+        self.peer = peer
+        self.netmask = netmask
+        self.network = network
+        self.ASPath = ASPath
         self.localpref = localpref
         self.selfOrigin = selfOrigin
         self.origin = origin
 
-class Router:
+    # Turn the contents into a dumps
+    def to_dict(self):
+        return {
+            'peer': self.peer,
+            'netmask': self.netmask,
+            'network': self.network,
+            'ASPath': self.ASPath,
+            'localpref': self.localpref,
+            'selfOrigin': self.selfOrigin,
+            'origin': self.origin
+        }
 
+    def is_preferred(self, other_table_entry):
+        print("Comparing if better or worse")
+        this_netmask_quads = list(int(qdn) for qdn in self.netmask.split('.'))
+        other_netmask_quads = list(int(qdn) for qdn in other_table_entry.netmask.split('.'))
+        # Compare mask length, local pref, selfOrigin, ASPath length,
+        if self.netmask != other_table_entry.netmask:
+            return self.quad1_greater_than_quad2(this_netmask_quads, other_netmask_quads)
+        elif self.localpref != other_table_entry.localpref:
+            return self.localpref > other_table_entry.localpref
+        elif self.selfOrigin != other_table_entry.selfOrigin:
+            return self.selfOrigin
+        elif len(self.ASPath) != len(other_table_entry.ASPath):
+            return len(self.ASPath) < len(other_table_entry.ASPath)
+        elif self.origin != other_table_entry.origin:
+            return self.origin1_better_than_origin2(self.origin, other_table_entry.origin)
+        else:
+            return self.quad1_greater_than_quad2(other_table_entry.peer, self.peer)
+
+    def quad1_greater_than_quad2(self, quad1, quad2):
+        for i in range(len(quad1)):
+            if quad1[i] > quad2[i]:
+                return True
+        return False
+
+    def origin1_better_than_origin2(self, origin1, origin2):
+        origin_dict = {'IGP': 3, 'EGP': 2, 'UNK': 1}
+        return origin_dict[origin1] > origin_dict[origin2]
+
+class Router:
     relations = {}
     sockets = {}
     ports = {}
+
     update_record = []
     withdraw_record = []
+
+    forwarding_table = []  # Stores TableEntry(s)
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -26,10 +72,12 @@ class Router:
             port, neighbor, relation = relationship.split("-")
 
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.sockets[neighbor].bind(('localhost', 0)) #Port 0 triggers OS to automatically return a suitable available port
+            self.sockets[neighbor].bind(
+                ('localhost', 0))  # Port 0 triggers OS to automatically return a suitable available port
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
-            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+            self.send(neighbor,
+                      json.dumps({"type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}}))
 
     def our_addr(self, dst):
         quads = list(int(qdn) for qdn in dst.split('.'))
@@ -53,67 +101,153 @@ class Router:
                 msg = k.decode('utf-8')
 
                 print("Received message '%s' from %s" % (msg, srcif))
-                
-                self.parse_json(self, msg)
+
+                self.parse_json(msg, sock)
         return
 
-    def hardcode_temp(self):
-        self.send()
+    # Take in a general JSON message and handle it
+    def parse_json(self, msg, sock_received):
+        msg_dict = json.loads(msg)
 
-    def parse_json(self, msg):
-        payload_dict = json.loads(msg)
-
-        if payload_dict['type'] == 'update':
-            self.handle_update(self, payload_dict)
-        if payload_dict['type'] == 'handshake':
-            self.handle_handshake(self, payload_dict)
-        if payload_dict['type'] == 'withdraw':
-            self.handle_withdraw(self, payload_dict)
+        if msg_dict['type'] == 'update':
+            self.handle_update(msg_dict)
+        elif msg_dict['type'] == 'handshake':
+            self.handle_handshake(msg_dict)
+        elif msg_dict['type'] == 'withdraw':
+            self.handle_withdraw(msg_dict)
+        elif msg_dict['type'] == 'dump':
+            self.handle_dump(msg_dict)
+        elif msg_dict['type'] == 'data':
+            self.handle_data(msg_dict, sock_received)
         else:
-            raise Exception("Message type %s is not handled" % payload_dict['type'])
+            raise Exception("Message type %s is not handled" % msg_dict['type'])
 
-    def handle_update(self, payload_dict):
-        self.update_record.append(payload_dict)
-        src_ip = payload_dict['src']
-        dst_ip = payload_dict['dst']
-        msg_dict = json.loads(payload_dict['msg'])
+    def handle_update(self, update_dict):
+        self.update_record.append(update_dict)
+        src_ip = update_dict['src']
 
-        
-    
-    def broadcast(self, src_ip, payload_dict):
-        #Build 
-        announcement_dict = {}
-        announcement_dict['type'] = 'update'
-        announcement_dict['src'] = payload_dict['src']
-        announcement_dict['']
+        # Update table entries
+        self.add_table_entry(update_dict)
 
-        #Broadcast update to others
+        # Broadcast update to others
         if self.relations[src_ip] == 'cust':
-            print("do cust")
+            self.broadcast_update(update_dict, True)
         elif self.relations[src_ip] == 'peer' or self.relations[src_ip] == 'prov':
-            print('do rest')
+            self.broadcast_update(update_dict, False)
         else:
             raise Exception("Could not match ip to relation")
-        print("todo")
 
-    def handle_handshake(self, json_payload):
-        print("TO DO HANDSHAKE")
+    # Add a forwarding table entry
+    def add_table_entry(self, update_dict):
+        msg_dict = update_dict['msg']
+        peer = update_dict['src']
+        netmask = msg_dict['netmask']
+        network = msg_dict['network']
+        ASPath = msg_dict['ASPath']
+        localpref = msg_dict['localpref']
+        selfOrigin = msg_dict['selfOrigin']
+        origin = msg_dict['origin']
 
-    def handle_withdraw(self, json_payload):
-        payload = json.loads(json_payload)
-        self.withdraw_record.append(payload)
+        new_entry = TableEntry(peer, netmask, network, ASPath, localpref, selfOrigin, origin)
+        # NEED TO ADD AGGREGATION LATER
+        self.forwarding_table.append(new_entry)
+
+    # Broadcast updates based on relation. If the message is from a customer, broadcast to all other networks.
+    def broadcast_update(self, update_dict, from_cust):
+        for ip in list(self.relations.keys()):
+            if ip == update_dict['src']:
+                continue
+            if self.relations[ip] == 'cust':
+                self.send_update_to(update_dict, ip)
+            elif from_cust:
+                self.send_update_to(update_dict, ip)
+        return
+
+    # Send an update to a specific network
+    def send_update_to(self, update_dict, dst_ip):
+        src_ip = self.our_addr(dst_ip)
+        announcement_dict = {}
+        announcement_dict['type'] = 'update'
+        announcement_dict['src'] = src_ip
+        announcement_dict['dst'] = dst_ip
+
+        msg_payload_dict = update_dict['msg']
+        as_path = [self.asn] + msg_payload_dict['ASPath']
+        print("new AS_Path is:")
+        print(as_path)
+        announcement_payload_dict = {}
+        announcement_payload_dict['network'] = msg_payload_dict['network']
+        announcement_payload_dict['netmask'] = msg_payload_dict['netmask']
+        announcement_payload_dict['ASPath'] = as_path
+        announcement_dict['msg'] = announcement_payload_dict
+
+        self.send(dst_ip, json.dumps(announcement_dict))
+        return
+
+    # Handle a received message of type data
+    def handle_data(self, data_dict, sock_received):
+        routes_to_destination = []
+        for entry in self.forwarding_table:
+            if self.mask(data_dict['dst'], entry.netmask) == self.mask(entry.network, entry.netmask):
+                routes_to_destination.append(entry)
+        print("Amount of routes %d" % len(routes_to_destination))
+        while len(routes_to_destination) > 1:
+            left_index_preferred = routes_to_destination[0].is_preferred(routes_to_destination[1])
+            if left_index_preferred:
+                del routes_to_destination[1]
+            else:
+                del routes_to_destination[0]
+
+        data_forward_dict = {}
+        data_forward_dict['type'] = 'data'
+        data_forward_dict['src'] = self.our_addr(sock_received)
+        data_forward_dict['msg'] = data_dict['msg']
+
+        if len(routes_to_destination) == 0:
+            print("Return to sender")
+            data_forward_dict['dst'] = sock_received
+            self.send(sock_received, json.dumps(data_forward_dict))
+            return
+
+        data_forward_dict['dst'] = data_dict['dst']
+        self.send(routes_to_destination[0].peer, json.dumps(data_forward_dict))
+        return
+
+
+    def handle_handshake(self, handshake_dict):
+        print("HANDSHAKE - not expected")
+        return
+
+    def handle_withdraw(self, withdraw_dict):
+        self.withdraw_record.append(withdraw_dict)
+        # Next remove dead entry from table
+        return
+
+    def handle_dump(self, dump_dict):
+        response_table_dict = {}
+        response_table_dict['src'] = self.our_addr(dump_dict['src'])
+        response_table_dict['dst'] = dump_dict['src']
+        response_table_dict['type'] = 'table'
+
+        response_payload_list = []
+        for entry in self.forwarding_table:
+            response_payload_list.append(entry.to_dict())
+
+        response_table_dict['msg'] = response_payload_list
+        self.send(dump_dict['src'], json.dumps(response_table_dict))
+        return
 
     # Takes in a network ip and a net_mask and returns a masked network ip
     def mask(self, network, net_mask) -> str:
         network_quads = list(int(qdn) for qdn in network.split('.'))
         net_mask_quads = list(int(qdn) for qdn in net_mask.split('.'))
-        
+
         masked_quads = []
         for i in range(len(network_quads)):
             masked_binary_quad = network_quads[i] & net_mask_quads[i]
             masked_quads.insert(i, masked_binary_quad)
-        return "%d.%d.%d.%d" % (masked_quads[0], masked_quads[1], masked_quads[2], masked_quads[3]) 
-    
+        return "%d.%d.%d.%d" % (masked_quads[0], masked_quads[1], masked_quads[2], masked_quads[3])
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='route packets')
@@ -122,3 +256,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     router = Router(args.asn, args.connections)
     router.run()
+
+# ./run configs/1-1-simple-send.conf
