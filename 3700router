@@ -15,7 +15,7 @@ class TableEntry:
         self.selfOrigin = selfOrigin
         self.origin = origin
 
-    # Turn the contents into a dumps
+    # Turn the contents into a dict
     def to_dict(self):
         return {
             'peer': self.peer,
@@ -28,7 +28,6 @@ class TableEntry:
         }
 
     def is_preferred(self, other_table_entry):
-        print("Comparing if better or worse")
         this_netmask_quads = list(int(qdn) for qdn in self.netmask.split('.'))
         other_netmask_quads = list(int(qdn) for qdn in other_table_entry.netmask.split('.'))
         # Compare mask length, local pref, selfOrigin, ASPath length,
@@ -43,7 +42,13 @@ class TableEntry:
         elif self.origin != other_table_entry.origin:
             return self.origin1_better_than_origin2(self.origin, other_table_entry.origin)
         else:
-            return self.quad1_greater_than_quad2(other_table_entry.peer, self.peer)
+            boolean_test = self.quad1_less_than_quad2(other_table_entry.peer, self.peer)
+            print("quad 1 ", other_table_entry.peer, ", is less than quad 2 ", self.peer, " = ", boolean_test)
+
+            this_peer_quads = list(int(qdn) for qdn in self.peer.split('.'))
+            other_peer_quads = list(int(qdn) for qdn in other_table_entry.peer.split('.'))
+
+            return self.quad1_less_than_quad2(this_peer_quads, other_peer_quads)
 
     def quad1_greater_than_quad2(self, quad1, quad2):
         for i in range(len(quad1)):
@@ -51,14 +56,25 @@ class TableEntry:
                 return True
         return False
 
+    def quad1_less_than_quad2(self, quad1, quad2):
+        for i in range(len(quad1)):
+            if quad1[i] < quad2[i]:
+                return True
+            elif quad1[i] > quad2[i]:
+                return False
+        print("The quads are Equal :O")
+        return False
+
     def origin1_better_than_origin2(self, origin1, origin2):
         origin_dict = {'IGP': 3, 'EGP': 2, 'UNK': 1}
         return origin_dict[origin1] > origin_dict[origin2]
+
 
 class Router:
     relations = {}
     sockets = {}
     ports = {}
+    # socket_masks = {}
 
     update_record = []
     withdraw_record = []
@@ -92,7 +108,7 @@ class Router:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
             for conn in socks:
                 k, addr = conn.recvfrom(65535)
-                print("k: %s, addr: %s" % (k, addr))
+                print("Received: k: %s, addr: %s" % (k, addr))
                 srcif = None
                 for sock in self.sockets:
                     if self.sockets[sock] == conn:
@@ -184,14 +200,31 @@ class Router:
         self.send(dst_ip, json.dumps(announcement_dict))
         return
 
-    # Handle a received message of type data (STILL NEED TO HANDLE ILLEGAL DATA - bad relationship)
+    # Handle a received message of type data
     def handle_data(self, data_dict, sock_received):
+        print("Relations:")
+        print(self.relations)
+        for table_entry in self.forwarding_table:
+            if self.mask(table_entry.network, table_entry.netmask) == self.mask(data_dict['src'], table_entry.netmask):
+                src_netmask = table_entry.netmask
+                src_network = table_entry.network
+            if self.mask(table_entry.network, table_entry.netmask) == self.mask(data_dict['dst'], table_entry.netmask):
+                print("Found match for peer masked")
+                dst_netmask = table_entry.netmask
+                dst_peer = table_entry.peer
+
+        if (self.relations[sock_received] == 'peer' or self.relations[sock_received] == 'prov') \
+                and (self.relations[dst_peer] == 'peer' or self.relations[dst_peer] == 'prov'):
+            print("Illegal send")
+            return
+
         routes_to_destination = []
         # Fill out any routes that fit network masks
         for entry in self.forwarding_table:
             if self.mask(data_dict['dst'], entry.netmask) == self.mask(entry.network, entry.netmask):
                 routes_to_destination.append(entry)
         print("Amount of routes %d" % len(routes_to_destination))
+        print(data_dict, ", ", routes_to_destination)
         while len(routes_to_destination) > 1:
             left_index_preferred = routes_to_destination[0].is_preferred(routes_to_destination[1])
             if left_index_preferred:
@@ -211,9 +244,9 @@ class Router:
             return
 
         data_forward_dict['dst'] = data_dict['dst']
+        print("Sending to ", routes_to_destination[0].peer)
         self.send(routes_to_destination[0].peer, json.dumps(data_forward_dict))
         return
-
 
     def handle_handshake(self, handshake_dict):
         print("HANDSHAKE - not expected")
@@ -222,6 +255,56 @@ class Router:
     def handle_withdraw(self, withdraw_dict):
         self.withdraw_record.append(withdraw_dict)
         # Next remove dead entry from table
+        src_ip = withdraw_dict['src']
+
+        # Withdraw Table Entry
+        self.withdraw_table_entry(withdraw_dict)
+
+        # Broadcast update to others
+        if self.relations[src_ip] == 'cust':
+            self.broadcast_withdraw(withdraw_dict, True)
+        elif self.relations[src_ip] == 'peer' or self.relations[src_ip] == 'prov':
+            self.broadcast_withdraw(withdraw_dict, False)
+        else:
+            raise Exception("Could not match ip to relation")
+
+        return
+
+    # Remove items from the forwarding table if they are from the peer sending the withdraw and match the network and netmask
+    def withdraw_table_entry(self, withdraw_dict):
+        msg_list_of_dict = withdraw_dict['msg']
+        print("Size of withdraw list: ", len(msg_list_of_dict))
+
+        new_forwarding_table = []
+        for dict in msg_list_of_dict:
+            for table_entry in self.forwarding_table:
+                if not (table_entry.peer == withdraw_dict['src'] and table_entry.network == dict[
+                    'network'] and table_entry.netmask == dict['netmask']):
+                    new_forwarding_table.append(table_entry)  # Add to new table if it is NOT a match
+        self.forwarding_table = new_forwarding_table
+        return
+
+    # Send the withdraw message depending on relation
+    def broadcast_withdraw(self, withdraw_dict, from_cust):
+        for ip in list(self.relations.keys()):
+            if ip == withdraw_dict['src']:
+                continue
+            if self.relations[ip] == 'cust':
+                self.send_withdraw_to(withdraw_dict, ip)
+            elif from_cust:
+                self.send_withdraw_to(withdraw_dict, ip)
+        return
+
+    def send_withdraw_to(self, withdraw_dict, dst_ip):
+        src_ip = self.our_addr(dst_ip)
+        announcement_dict = {}
+        announcement_dict['type'] = 'withdraw'
+        announcement_dict['src'] = src_ip
+        announcement_dict['dst'] = dst_ip
+
+        announcement_dict['msg'] = withdraw_dict['msg']
+
+        self.send(dst_ip, json.dumps(announcement_dict))
         return
 
     def handle_dump(self, dump_dict):
@@ -240,6 +323,7 @@ class Router:
 
     # Takes in a network ip and a net_mask and returns a masked network ip
     def mask(self, network, net_mask) -> str:
+
         network_quads = list(int(qdn) for qdn in network.split('.'))
         net_mask_quads = list(int(qdn) for qdn in net_mask.split('.'))
 
@@ -247,7 +331,9 @@ class Router:
         for i in range(len(network_quads)):
             masked_binary_quad = network_quads[i] & net_mask_quads[i]
             masked_quads.insert(i, masked_binary_quad)
-        return "%d.%d.%d.%d" % (masked_quads[0], masked_quads[1], masked_quads[2], masked_quads[3])
+        output = "%d.%d.%d.%d" % (masked_quads[0], masked_quads[1], masked_quads[2], masked_quads[3])
+        # print("masking %s with %s and returning output %s" % (network, net_mask, output))
+        return output
 
 
 if __name__ == "__main__":
