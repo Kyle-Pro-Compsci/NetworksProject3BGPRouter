@@ -15,6 +15,12 @@ class TableEntry:
         self.selfOrigin = selfOrigin
         self.origin = origin
 
+    def __str__(self):
+        return "peer: " + str(self.peer) + " netmask: " + str(self.netmask) \
+               + " network: " + str(self.network) + " ASPath: " + str(self.ASPath) \
+               + " localpref: " + str(self.localpref) + " selfOrigin: " \
+               + str(self.selfOrigin) + " origin: " + str(self.origin)
+
     # Turn the contents into a dict
     def to_dict(self):
         return {
@@ -32,6 +38,8 @@ class TableEntry:
         other_netmask_quads = list(int(qdn) for qdn in other_table_entry.netmask.split('.'))
         # Compare mask length, local pref, selfOrigin, ASPath length,
         if self.netmask != other_table_entry.netmask:
+            netmask_test = self.quad1_greater_than_quad2(this_netmask_quads, other_netmask_quads)
+            print("quad 1 ", self.netmask, ", is greater than quad 2 ", other_table_entry.netmask, " = ", netmask_test)
             return self.quad1_greater_than_quad2(this_netmask_quads, other_netmask_quads)
         elif self.localpref != other_table_entry.localpref:
             return self.localpref > other_table_entry.localpref
@@ -42,12 +50,10 @@ class TableEntry:
         elif self.origin != other_table_entry.origin:
             return self.origin1_better_than_origin2(self.origin, other_table_entry.origin)
         else:
-            boolean_test = self.quad1_less_than_quad2(other_table_entry.peer, self.peer)
-            print("quad 1 ", other_table_entry.peer, ", is less than quad 2 ", self.peer, " = ", boolean_test)
-
             this_peer_quads = list(int(qdn) for qdn in self.peer.split('.'))
             other_peer_quads = list(int(qdn) for qdn in other_table_entry.peer.split('.'))
-
+            boolean_test = self.quad1_less_than_quad2(this_peer_quads, other_peer_quads)
+            print("quad 1 ", self.peer, ", is less than quad 2 ", other_table_entry.peer, " = ", boolean_test)
             return self.quad1_less_than_quad2(this_peer_quads, other_peer_quads)
 
     def quad1_greater_than_quad2(self, quad1, quad2):
@@ -189,8 +195,8 @@ class Router:
 
         msg_payload_dict = update_dict['msg']
         as_path = [self.asn] + msg_payload_dict['ASPath']
-        print("new AS_Path is:")
-        print(as_path)
+        #print("new AS_Path is:")
+        #print(as_path)
         announcement_payload_dict = {}
         announcement_payload_dict['network'] = msg_payload_dict['network']
         announcement_payload_dict['netmask'] = msg_payload_dict['netmask']
@@ -202,35 +208,30 @@ class Router:
 
     # Handle a received message of type data
     def handle_data(self, data_dict, sock_received):
-        print("Relations:")
-        print(self.relations)
-        for table_entry in self.forwarding_table:
-            if self.mask(table_entry.network, table_entry.netmask) == self.mask(data_dict['src'], table_entry.netmask):
-                src_netmask = table_entry.netmask
-                src_network = table_entry.network
-            if self.mask(table_entry.network, table_entry.netmask) == self.mask(data_dict['dst'], table_entry.netmask):
-                print("Found match for peer masked")
-                dst_netmask = table_entry.netmask
-                dst_peer = table_entry.peer
-
-        if (self.relations[sock_received] == 'peer' or self.relations[sock_received] == 'prov') \
-                and (self.relations[dst_peer] == 'peer' or self.relations[dst_peer] == 'prov'):
-            print("Illegal send")
-            return
 
         routes_to_destination = []
         # Fill out any routes that fit network masks
         for entry in self.forwarding_table:
             if self.mask(data_dict['dst'], entry.netmask) == self.mask(entry.network, entry.netmask):
                 routes_to_destination.append(entry)
-        print("Amount of routes %d" % len(routes_to_destination))
-        print(data_dict, ", ", routes_to_destination)
+        #print("Amount of routes %d" % len(routes_to_destination))
+        #print(data_dict, ", ", routes_to_destination)
         while len(routes_to_destination) > 1:
             left_index_preferred = routes_to_destination[0].is_preferred(routes_to_destination[1])
             if left_index_preferred:
+                print("Choosing ", routes_to_destination[0], "over ", routes_to_destination[1])
                 del routes_to_destination[1]
             else:
+                print("Choosing ", routes_to_destination[1], "over ", routes_to_destination[0])
                 del routes_to_destination[0]
+
+        dst_peer2 = routes_to_destination[0].peer
+
+        if (self.relations[sock_received] == 'peer' or self.relations[sock_received] == 'prov') \
+                and (self.relations[dst_peer2] == 'peer' or self.relations[dst_peer2] == 'prov'):
+            print("Destination relation: ", dst_peer2, " ", self.relations[dst_peer2])
+            print("Illegal send")
+            return
 
         data_forward_dict = {}
         data_forward_dict['type'] = 'data'
