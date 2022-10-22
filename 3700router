@@ -3,6 +3,7 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 
+# Data structure for storing entries in the Forwarding Table
 class TableEntry:
     ASPath = []
 
@@ -15,6 +16,7 @@ class TableEntry:
         self.selfOrigin = selfOrigin
         self.origin = origin
 
+    # For print statements using TableEntry - names and prints all properties
     def __str__(self):
         return "peer: " + str(self.peer) + " netmask: " + str(self.netmask) \
                + " network: " + str(self.network) + " ASPath: " + str(self.ASPath) \
@@ -33,6 +35,7 @@ class TableEntry:
             'origin': self.origin
         }
 
+    # Compares the self Table_entry
     def is_preferred(self, other_table_entry):
         this_netmask_quads = list(int(qdn) for qdn in self.netmask.split('.'))
         other_netmask_quads = list(int(qdn) for qdn in other_table_entry.netmask.split('.'))
@@ -144,6 +147,7 @@ class Router:
         else:
             raise Exception("Message type %s is not handled" % msg_dict['type'])
 
+    # Takes in an update message (decoded into a dict) and adds it to the forwarding table and broadcasts.
     def handle_update(self, update_dict):
         self.update_record.append(update_dict)
         src_ip = update_dict['src']
@@ -159,7 +163,7 @@ class Router:
         else:
             raise Exception("Could not match ip to relation")
 
-    # Add a forwarding table entry
+    # Add a forwarding table entry taking in a decoded update message
     def add_table_entry(self, update_dict):
         msg_dict = update_dict['msg']
         peer = update_dict['src']
@@ -195,8 +199,7 @@ class Router:
 
         msg_payload_dict = update_dict['msg']
         as_path = [self.asn] + msg_payload_dict['ASPath']
-        #print("new AS_Path is:")
-        #print(as_path)
+
         announcement_payload_dict = {}
         announcement_payload_dict['network'] = msg_payload_dict['network']
         announcement_payload_dict['netmask'] = msg_payload_dict['netmask']
@@ -214,8 +217,7 @@ class Router:
         for entry in self.forwarding_table:
             if self.mask(data_dict['dst'], entry.netmask) == self.mask(entry.network, entry.netmask):
                 routes_to_destination.append(entry)
-        #print("Amount of routes %d" % len(routes_to_destination))
-        #print(data_dict, ", ", routes_to_destination)
+
         while len(routes_to_destination) > 1:
             left_index_preferred = routes_to_destination[0].is_preferred(routes_to_destination[1])
             if left_index_preferred:
@@ -252,6 +254,7 @@ class Router:
     def handle_handshake(self, handshake_dict):
         print("HANDSHAKE - not expected")
         return
+
 
     def handle_withdraw(self, withdraw_dict):
         self.withdraw_record.append(withdraw_dict)
@@ -308,6 +311,7 @@ class Router:
         self.send(dst_ip, json.dumps(announcement_dict))
         return
 
+    # Handle a dump message by encoding and sending back the entire forwarding table.
     def handle_dump(self, dump_dict):
         response_table_dict = {}
         response_table_dict['src'] = self.our_addr(dump_dict['src'])
